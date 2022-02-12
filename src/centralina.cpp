@@ -343,7 +343,7 @@ void visualizzaPressioneIniezione() {
         lcd.setCursor(0,0);
         lcd.print("PRESS:       bar");
         lcd.setCursor(0,1);
-        lcd.print("Iniettore acceso");
+        lcd.print("Iniezione attiva");
         prima_iniezione = false;
     }
     lcd.setCursor(8,0);

@@ -45,6 +45,12 @@ void diminuisciTempi(float press_min, float press_max, uint32_t *t, uint32_t t_m
 uint32_t leggiEeprom(uint8_t i);               // LEGGE LA EEPROM
 void scriviEeprom(uint32_t valore, uint8_t i); // SOVRASCRIVE LA EEPROM
 
+// Funzioni per la stampa di interi a 64 bit (non supportate nativamente)
+size_t print64(Print* pr, uint64_t n);
+size_t print64(Print* pr, int64_t n);
+size_t println64(Print* pr, int64_t n);
+size_t println64(Print* pr, uint64_t n);
+
 
 /*-------------------- DEFINIZIONE VARIABILI --------------------*/
 
@@ -69,7 +75,7 @@ const float PRESS[5] = {  // Pressioni soglia
     0.3,
     3.0
 };
-const int T_OFF_MIN = 50; // Tempo off minimo selezionabile
+const int T_OFF_MIN = 25; // Tempo off minimo selezionabile
 const int OFFSET = 25;    // Offset per l'incremento e il decremento dei tempi di iniezione
 
 
@@ -137,7 +143,7 @@ void setup() {
     lcd.createChar(1, freccia_angolo_destra);
     lcd.createChar(2, freccia_angolo_sinistra);
     lcd.setCursor(0, 0);
-    lcd.print("ACCENSIONE  v1.4");
+    lcd.print("ACCENSIONE 1.4.1");
     for (int i = 0; i < 16; i++) {
         lcd.setCursor(i, 1);
         lcd.print("-");
@@ -298,7 +304,6 @@ void loop() {
 
     // AZIONA IL RELE SOLO SE CI SI TROVA NELLA HOME
     if (funzione == 0) {
-
         // AZIONA IL RELE IN BASE ALLA PRESSIONE
         if (pressione <= PRESS[0]) {
             tempo_partenza = millis();
@@ -427,10 +432,15 @@ void attivaIniezione(uint32_t t_off, uint32_t t_on, uint8_t numero) {
 
     // Calcola il ritardo causato dall'esecuzione del resto del codice
     ritardo = millis() - tempo_partenza;
-    t_off -= ritardo;
+
+    if (ritardo <= t_off) {
+        t_off -= ritardo;
+    } else {
+        t_off = 0;
+    }
 
     #ifdef DEBUG
-    Serial.print(ritardo);
+    print64(&Serial, ritardo);
     Serial.print(" ");
     #endif
 
@@ -448,15 +458,15 @@ void attivaIniezione(uint32_t t_off, uint32_t t_on, uint8_t numero) {
     while (millis() - inizio_iniezione <= t_on) {
         pressione = leggiSensorePressione();
         visualizzaPressioneIniezione();
-
-        // ESCE SE IL RANGE DELLA PRESSIONE è CAMBIATO
-        if ((pressione > PRESS[numero]) || (pressione < PRESS[numero-1])) {
+        
+        // ESCE SE IL RANGE DELLA PRESSIONE È CAMBIATO DI ALMENO 0,03bar
+        if ((pressione > (PRESS[numero] + 0.05)) || (pressione < (PRESS[numero-1] - 0.05))) {
             return;
         }
     }
 
     #ifdef DEBUG
-    Serial.print(millis() - inizio_iniezione);
+    print64(&Serial, (millis() - inizio_iniezione));
     Serial.print(" ");
     #endif
 
@@ -468,7 +478,6 @@ void attivaIniezione(uint32_t t_off, uint32_t t_on, uint8_t numero) {
     while (millis() - inizio_iniezione <= t_off) {
         pressione = leggiSensorePressione();
         visualizzaPressioneIniezione();
-
         // ESCE SE IL RANGE DELLA PRESSIONE è CAMBIATO
         if ((pressione > PRESS[numero]) || (pressione < PRESS[numero-1])) {
             return;
@@ -476,7 +485,7 @@ void attivaIniezione(uint32_t t_off, uint32_t t_on, uint8_t numero) {
     }
 
     #ifdef DEBUG
-    Serial.println(millis() - inizio_iniezione);
+    println64(&Serial, (millis() - inizio_iniezione));
     #endif
 
     tempo_partenza = millis();
@@ -582,4 +591,37 @@ void scriviEeprom(uint32_t valore, uint8_t i) {
         EEPROM.update(i*2, highByte(valore));
         EEPROM.update(i*2+1, lowByte(valore));
     }
+}
+
+
+// STAMPA DI INTERI A 64bit
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wreturn-type" //Ignora il fatto che la funziona non ritorna nulla
+size_t print64(Print* pr, uint64_t n) {
+    char buf[21];
+    char *str = &buf[sizeof(buf) - 1];
+    *str = '\0';
+    do {
+        uint64_t m = n;
+        n /= 10;
+        *--str = m - 10*n + '0';
+    } while (n);
+    pr->print(str);
+}
+#pragma GCC diagnostic pop
+
+size_t print64(Print* pr, int64_t n) {
+    size_t s = 0;
+    if (n < 0) {
+        n = -n;
+        s = pr->print('-');
+    }  return s + print64(pr, (uint64_t)n);
+}
+
+size_t println64(Print* pr, int64_t n) {
+    return print64(pr, n) + pr->println();
+}
+
+size_t println64(Print* pr, uint64_t n) {
+    return print64(pr, n) + pr->println();
 }

@@ -1,7 +1,7 @@
 /**
  * Autore:  Bartocetti Enrico
- * Data: 11/02/2022
- * Versione: 1.4
+ * Data: 03/05/2022
+ * Versione: 2.0
 **/
 
 
@@ -15,12 +15,12 @@
 
 /*-------------------- ASSEGNAZIONE DEI PIN --------------------*/
 
-#define PRESSURE_SENSOR A5 // Pin del sensore della pressione
-#define BUTTON1 5 // Pin del pulsante MENU
-#define BUTTON2 6 // Pin del pulsante +
-#define BUTTON3 7 // Pin del pulsante -
-#define BUTTON4 8 // Pin del pulsante INVIO
-#define RELE 10   // Pin del relé
+#define PRESSURE_SENSOR 4 // Pin del sensore della pressione
+#define BUTTON1 34 // Pin del pulsante MENU
+#define BUTTON2 35 // Pin del pulsante +
+#define BUTTON3 25 // Pin del pulsante -
+#define BUTTON4 26 // Pin del pulsante INVIO
+#define RELE 27   // Pin del relé
 
 
 /*------------------ PROTOTIPI DELLE FUNZIONI ------------------*/
@@ -73,7 +73,7 @@ const float PRESS[5] = {  // Pressioni soglia
     0.1,
     0.2,
     0.3,
-    3.0
+    9.9
 };
 const int T_OFF_MIN = 25; // Tempo off minimo selezionabile
 const int OFFSET = 25;    // Offset per l'incremento e il decremento dei tempi di iniezione
@@ -118,7 +118,7 @@ byte freccia_angolo_sinistra[8] = {
 void setup() {
 
     #ifdef DEBUG
-    Serial.begin(115200);
+    Serial.begin(9600);
     #endif
 
     // INIZIALIZZAZIONE INPUT / OUTPUT
@@ -130,6 +130,8 @@ void setup() {
     pinMode(RELE, OUTPUT); 
 
     // LETTURA DEI TEMPI DALLA EEPROM
+    EEPROM.begin(512);  
+
     for (int i = 0; i < 2; i++) {
         for (int j = 0; j < 4; j++) {
             tempi[j][i] = leggiEeprom(j + (i*4));
@@ -143,7 +145,7 @@ void setup() {
     lcd.createChar(1, freccia_angolo_destra);
     lcd.createChar(2, freccia_angolo_sinistra);
     lcd.setCursor(0, 0);
-    lcd.print("ACCENSIONE 1.4.1");
+    lcd.print(" ACCENSIONE 2.0 ");
     for (int i = 0; i < 16; i++) {
         lcd.setCursor(i, 1);
         lcd.print("-");
@@ -588,9 +590,10 @@ uint32_t leggiEeprom(uint8_t i) {
 // SOVRASCRIVE LA EEPROM
 void scriviEeprom(uint32_t valore, uint8_t i) {
     for (int j = 0; j < 2; j++) {
-        EEPROM.update(i*2, highByte(valore));
-        EEPROM.update(i*2+1, lowByte(valore));
-    }
+        EEPROM.put(i*2, highByte(valore));
+        EEPROM.put(i*2+1, lowByte(valore));
+    }  
+    EEPROM.commit();
 }
 
 

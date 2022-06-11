@@ -1,82 +1,97 @@
 /**
  * Autore:  Bartocetti Enrico
- * Data: 03/05/2022
- * Versione: 2.0
+ * Data: 11/05/2022
+ * Versione: 3.0
 **/
 
 
 /*-------------------- IMPORTAZIONE LIBRERIE --------------------*/
 
-#include <Arduino.h>
 #include <EEPROM.h>
+#include <Arduino.h>
+#include <ArduinoJson.h>
+#include <BluetoothSerial.h>
 #include <LiquidCrystal_I2C.h>
 //#define DEBUG yes // Togliere il commento per avere sulla seriale: Tempo Ritardo, Tempo iniezione ON, Tempo iniezione OFF
 
 
 /*-------------------- ASSEGNAZIONE DEI PIN --------------------*/
 
+#define RELE 27           // Pin del relé
+#define BUTTON1 34        // Pin del pulsante MENU
+#define BUTTON2 35        // Pin del pulsante +
+#define BUTTON3 25        // Pin del pulsante -
+#define BUTTON4 26        // Pin del pulsante INVIO
 #define PRESSURE_SENSOR 4 // Pin del sensore della pressione
-#define BUTTON1 34 // Pin del pulsante MENU
-#define BUTTON2 35 // Pin del pulsante +
-#define BUTTON3 25 // Pin del pulsante -
-#define BUTTON4 26 // Pin del pulsante INVIO
-#define RELE 27   // Pin del relé
 
 
-/*------------------ PROTOTIPI DELLE FUNZIONI ------------------*/
+/*-------------------- STATI DEL PROGRAMMA --------------------*/
 
-// Funzioni per la grafica
-void visualizzaPressione();          // VISUALIZZA LA PRESSIONE NELLA PAGINA INIZIALE
-void visualizzaPressioneIniezione(); // VISUALIZZA LA PRESSIONE NELLA PAGINA INIZIALE
-void visualizzaPaginaMenu(float press_iniz, float press_fin);               // VISUALIZZA LE PAGINE DEL MENU
-void visualizzaModifiche(uint32_t tempo, float press_min, float press_max); // DURANTE LA MODIFICA, VISUALIZZA LE PRESSIONI "SOGLIA" E I RELATIVI TEMPI
-
-// Funzioni per sensori e attuatori
-float leggiSensorePressione();  // LEGGE LA PRESSIONE DAL SENSORE
-void controlloPulsante();       // CONTROLLA SE IL PRIMO PULSANTE VIENE PREMUTO
-void attivaIniezione(uint32_t t_off, uint32_t t_on, uint8_t numero); // ACCENDE E SPEGNE IL RELE
-
-// Funzioni per la modifica dei tempi
-void modificaTempi(float press_min, float press_max, uint32_t *t_off, uint32_t *t_on); // MODIFICA I TEMPI DI INIEZIONE
-void aumentaTempi(float press_min, float press_max, uint32_t *t);                      // AUMENTA I TEMPI DI INIEZIONE
-void diminuisciTempi(float press_min, float press_max, uint32_t *t, uint32_t t_min);   // DIMINUISCE I TEMPI DI INIEZIONE
-
-// Funzioni per la EEPROM
-uint32_t leggiEeprom(uint8_t i);               // LEGGE LA EEPROM
-void scriviEeprom(uint32_t valore, uint8_t i); // SOVRASCRIVE LA EEPROM
-
-// Funzioni per la stampa di interi a 64 bit (non supportate nativamente)
-size_t print64(Print* pr, uint64_t n);
-size_t print64(Print* pr, int64_t n);
-size_t println64(Print* pr, int64_t n);
-size_t println64(Print* pr, uint64_t n);
-
-
-/*-------------------- DEFINIZIONE VARIABILI --------------------*/
-
-bool iniezione = false;     // Flag di stato. Vero se è in corso l'iniezione
-bool prima_iniezione = true;// Usato per far pulire l'lcd alla prima iniezione
-float pressione;            // Pressione letta dal sensore
-float pressione_max;        // Pressione massima raggiunta
-uint8_t funzione;           // Contiene l'indice del menu in cui ci si trova. 0: Pagina iniziale
-uint32_t tempi[4][2];       // Matrice che contiene i tempi di iniezione. Riga 0: tempi off, Riga 1: tempi on
-uint64_t tempo_partenza;    // Tempo usato per calcolare il ritardo 
-uint64_t ritardo;           // Ritardo calcolato dato dall'esecuzione del codice durante l'iniezione
-uint64_t inizio_iniezione;  // Istante in cui inizia l'iniezione
-LiquidCrystal_I2C lcd(0x27, 16, 2); // Creazione dell'oggetto LCD
+typedef enum {
+    HOME,
+    INIETTORE_ON,
+    ATTESA_ON,
+    INIETTORE_OFF,
+    ATTESA_OFF,
+    VOCE_RESET_P_MAX,
+    VOCE_MODIFICA_TEMPI,
+    MODIFICA_OFF,
+    MODIFICA_ON,
+    CONFERMA_MODIFICA,
+    VOCE_SALVA_TEMPI,
+    CONFERMA_SALVATAGGIO,
+    VOCE_ACCENDI_BLUETOOTH,
+    VOCE_SPEGNI_BLUETOOTH,
+    VOCE_RIEPILOGO,
+    MOSTRA_RIEPILOGO
+} Stati;
 
 
 /*-------------------- DEFINIZIONE COSTANTI --------------------*/
 
-const float PRESS[5] = {  // Pressioni soglia
-    0.007,
+const int T_MIN = 25;   // Tempo minimo assegnabile
+const int OFFSET = 25;  // Offset durante la modifica dei tempi
+const int NUM_PRESSIONI = 4;    // Numero di pressioni soglia
+const float PRESS[NUM_PRESSIONI+1] = {  // Pressioni soglia
+    0.009,
     0.1,
     0.2,
     0.3,
     9.9
 };
-const int T_OFF_MIN = 25; // Tempo off minimo selezionabile
-const int OFFSET = 25;    // Offset per l'incremento e il decremento dei tempi di iniezione
+
+
+/*-------------------- DEFINIZIONE VARIABILI --------------------*/
+
+bool statoBT = false;            // False: Bluetooth spento, True: Bluetooth acceso
+bool schermo_aggiornato = false; // Flag per aggiornare lo schermo solo quando necessario
+float pressione;                 // Pressione letta dal sensore
+float pressione_max;             // Pressione massima raggiunta
+byte indice_soglia;              // Indice per la modifica / visualizzazione di una certa soglia
+uint32_t tempi[NUM_PRESSIONI][2];// Matrice che contiene i tempi di iniezione. Riga 0: tempi off, Riga 1: tempi on
+uint32_t appoggio_t_on;          // Appoggio usato durante la modifica
+uint32_t appoggio_t_off;         // Appoggio usato durante la modifica
+uint64_t inizio_iniezione;       // Istante in cui inizia l'iniezione
+
+String messaggioBT;              // Messaggio letto da BluetoothSerial
+Stati stato_attuale;             // Stato attuale del programma
+BluetoothSerial serialBT;        // Oggetto per la seriale via Bluetooth
+LiquidCrystal_I2C lcd(0x27, 16, 2);// Creazione dell'oggetto LCD
+
+
+/*------------------ PROTOTIPI DELLE FUNZIONI ------------------*/
+
+void leggiSensorePressione();   // Legge la pressione dal sensore
+
+void visualizzaPressione();                          // Visualizza la pressione nella pagina iniziale
+void visualizzaOpzioniMenu(String sx, String dx);    // Visualizza le opzioni disponibili per i pulsanti esterni
+void visualizzaOpzioniModifica(String sx, String dx);// Visualizza le opzioni disponibili per gli ultimi 3 pulsanti
+
+void aumentaTempo(uint32_t *tempo);     // Aumenta il tempo di iniezione
+void diminuisciTempo(uint32_t *tempo);  // Diminuisce il tempo di iniezione
+
+uint32_t leggiEeprom(uint8_t i);               // Legge la EEPROM
+void scriviEeprom(uint32_t valore, uint8_t i); // Sovrascrive la EEPROM
 
 
 /*------------- CREAZIONE CARATTERI PER SCHERMO LCD -------------*/
@@ -114,6 +129,17 @@ byte freccia_angolo_sinistra[8] = {
   0b11110,
 };
 
+byte simbolo_bt[8] = {
+  0b00110,
+  0b10101,
+  0b01110,
+  0b00100,
+  0b01110,
+  0b10101,
+  0b00110,
+  0b00100,
+};
+
 
 void setup() {
 
@@ -133,7 +159,7 @@ void setup() {
     EEPROM.begin(512);  
 
     for (int i = 0; i < 2; i++) {
-        for (int j = 0; j < 4; j++) {
+        for (int j = 0; j < NUM_PRESSIONI; j++) {
             tempi[j][i] = leggiEeprom(j + (i*4));
         }
     }
@@ -144,487 +170,522 @@ void setup() {
     lcd.createChar(0, freccia_giu);
     lcd.createChar(1, freccia_angolo_destra);
     lcd.createChar(2, freccia_angolo_sinistra);
+    lcd.createChar(3, simbolo_bt);
     lcd.setCursor(0, 0);
-    lcd.print(" ACCENSIONE 2.0 ");
+    lcd.print(" ACCENSIONE 3.0 ");
     for (int i = 0; i < 16; i++) {
         lcd.setCursor(i, 1);
         lcd.print("-");
         delay(150);
     }
 
-    funzione = 0;
-    pressione = leggiSensorePressione();
-    pressione_max = leggiSensorePressione();
-    visualizzaPressione();
-}
+    leggiSensorePressione();
+    pressione_max = pressione;
 
+    stato_attuale = HOME;
+}
 
 void loop() {
+    switch (stato_attuale) {
+        case HOME:
+            leggiSensorePressione();
+            visualizzaPressione();
 
-    // VISUALIZZA I MENU SOLO SE NON è IN CORSO L'INIEZIONE
-    if (!iniezione) {
+            if (pressione >= PRESS[0]) {
+                lcd.setCursor(0,1);
+                lcd.print("Iniezione attiva");
+                stato_attuale = INIETTORE_ON;
 
-        // Azzera la prima iniezione
-        if (!prima_iniezione) {
-            prima_iniezione = true;
-        }
+            } else if (digitalRead(BUTTON1)) {
+                while (digitalRead(BUTTON1)) lcd.clear();
+                stato_attuale = VOCE_RESET_P_MAX;
+            }
+            break;
         
-        controlloPulsante();
+        case INIETTORE_ON:
+            digitalWrite(RELE, HIGH);
+            inizio_iniezione = millis();
+            stato_attuale = ATTESA_ON;
+            break;
+        
+        case ATTESA_ON:
+            leggiSensorePressione();
+            lcd.home();
+            lcd.printf("Pressione: %1.2f ", pressione);
 
-        switch (funzione) {
+            if (pressione >= PRESS[3]) {
+                if (millis() - inizio_iniezione >= tempi[3][1]) stato_attuale = INIETTORE_OFF;
+            } else if (pressione >= PRESS[2]) {
+                if (millis() - inizio_iniezione >= tempi[2][1]) stato_attuale = INIETTORE_OFF;
+            } else if (pressione >= PRESS[1]) {
+                if (millis() - inizio_iniezione >= tempi[1][1]) stato_attuale = INIETTORE_OFF;
+            } else if (pressione >= PRESS[0]) {
+                if (millis() - inizio_iniezione >= tempi[0][1]) stato_attuale = INIETTORE_OFF;
+            } else {
+                digitalWrite(RELE, LOW);
+                stato_attuale = HOME;
+            }
 
-            case 0:
-                visualizzaPressione();
-                break;
-                
-            case 1:
-                lcd.setCursor(0,0);
+            break;
+        
+        case INIETTORE_OFF:
+            digitalWrite(RELE, LOW);
+            inizio_iniezione = millis();
+            stato_attuale = ATTESA_OFF;
+            break;
+
+        case ATTESA_OFF:
+            leggiSensorePressione();
+            lcd.home();
+            lcd.printf("Pressione: %1.2f ", pressione);
+
+            if (pressione >= PRESS[3]) {
+                if (millis() - inizio_iniezione >= tempi[3][0]) stato_attuale = INIETTORE_ON;
+            } else if (pressione >= PRESS[2]) {
+                if (millis() - inizio_iniezione >= tempi[2][0]) stato_attuale = INIETTORE_ON;
+            } else if (pressione >= PRESS[1]) {
+                if (millis() - inizio_iniezione >= tempi[1][0]) stato_attuale = INIETTORE_ON;
+            } else if (pressione >= PRESS[0]) {
+                if (millis() - inizio_iniezione >= tempi[0][0]) stato_attuale = INIETTORE_ON;
+            } else {
+                stato_attuale = HOME;
+            }
+
+            break;
+
+        case VOCE_RESET_P_MAX:
+            if (!schermo_aggiornato) {
+                lcd.home();
                 lcd.print("1)AZZERA PR MAX ");
-                lcd.setCursor(0, 1);
-                lcd.write(byte(2));
-                lcd.print("Next     Reset");
-                lcd.setCursor(15, 1);
-                lcd.write(byte(1));
+                visualizzaOpzioniMenu("Next", "Reset");
+                schermo_aggiornato = true;
+            }
 
-                if (digitalRead(BUTTON4)) {
-                    while (digitalRead(BUTTON4)) {
-                        lcd.setCursor(0,0);
-                        lcd.print("AZZERAMENTO     ");
-                    }
-                    pressione_max = leggiSensorePressione();
-                    funzione = 0;
+            if (digitalRead(BUTTON1)) {
+                while (digitalRead(BUTTON1)) lcd.clear();
+                schermo_aggiornato = false;
+                indice_soglia = 0;
+                stato_attuale = VOCE_MODIFICA_TEMPI;
+            } else if (digitalRead(BUTTON4)) {
+                while (digitalRead(BUTTON4)) {
+                    lcd.home();
+                    lcd.print("AZZERAMENTO     ");
+                    lcd.setCursor(0,1);
+                    lcd.print("                ");
                 }
-                break;
+                pressione_max = -50;
+                schermo_aggiornato = false;
+                stato_attuale = HOME;
+            }
+            break;
+        
+        case VOCE_MODIFICA_TEMPI:
+            if (!schermo_aggiornato) {
+                lcd.home();
+                lcd.printf("%d)Da %1.1f a %1.1f  ", (indice_soglia + 2), PRESS[indice_soglia], PRESS[indice_soglia + 1]);
+                visualizzaOpzioniMenu("Next", "Set");
+                schermo_aggiornato = true;
+            }
 
-            case 2:
-                visualizzaPaginaMenu(PRESS[0], PRESS[1]);
-                if (digitalRead(BUTTON4)) {
-                    while (digitalRead(BUTTON4)) {
-                        lcd.setCursor(0,0);
-                        lcd.print("MODIFICA        ");
-                    }
-                    modificaTempi(PRESS[0], PRESS[1], &tempi[0][0], &tempi[0][1]);
-                }
-                break;                                       
+            if (digitalRead(BUTTON1)) {
+                while (digitalRead(BUTTON1)) lcd.clear();
+                schermo_aggiornato = false;
+                indice_soglia = (indice_soglia < NUM_PRESSIONI) ? (indice_soglia + 1) : 0;
+                stato_attuale = (indice_soglia == NUM_PRESSIONI) ? VOCE_SALVA_TEMPI : VOCE_MODIFICA_TEMPI;
+            } else if (digitalRead(BUTTON4)) {
+                while (digitalRead(BUTTON4)) lcd.clear();
+                schermo_aggiornato = false;
+                stato_attuale = MODIFICA_OFF;
+            }
+            break;
 
-            case 3:
-                visualizzaPaginaMenu(PRESS[1], PRESS[2]);
-                if (digitalRead(BUTTON4)) {
-                    while (digitalRead(BUTTON4)) {
-                        lcd.setCursor(0,0);
-                        lcd.print("MODIFICA        ");
-                    }
-                    modificaTempi(PRESS[1], PRESS[2], &tempi[1][0], &tempi[1][1]);
-                }
-                break;
+        case MODIFICA_OFF:
+            if (!schermo_aggiornato) {
+                appoggio_t_off = tempi[indice_soglia][0];
+                visualizzaOpzioniModifica("Off", "Set");
+                schermo_aggiornato = true;
+            }
 
-            case 4:
-                visualizzaPaginaMenu(PRESS[2], PRESS[3]);
-                if (digitalRead(BUTTON4)) {
-                    while (digitalRead(BUTTON4)) {
-                        lcd.setCursor(0,0);
-                        lcd.print("MODIFICA        ");
-                    }
-                    modificaTempi(PRESS[2], PRESS[3], &tempi[2][0], &tempi[2][1]);
-                }
-                break;
+            lcd.home();
+            lcd.printf("%1.1f-%1.1f:  %dms  ", PRESS[indice_soglia], PRESS[indice_soglia+1], appoggio_t_off);
 
-            case 5:
-                visualizzaPaginaMenu(PRESS[3], PRESS[4]);
-                if (digitalRead(BUTTON4)) {
-                    while (digitalRead(BUTTON4)) {
-                        lcd.setCursor(0,0);
-                        lcd.print("MODIFICA        ");
-                    }
-                    modificaTempi(PRESS[3], PRESS[4], &tempi[3][0], &tempi[3][1]);
-                }
-                break;
+            if (digitalRead(BUTTON2)) {
+                aumentaTempo(&appoggio_t_off);
 
-            case 6:
-                lcd.setCursor(0,0);
+            } else if (digitalRead(BUTTON3)) {
+                diminuisciTempo(&appoggio_t_off);
+
+            } else if (digitalRead(BUTTON4)) {
+                while (digitalRead(BUTTON4)) lcd.clear();
+                schermo_aggiornato = false;
+                stato_attuale = MODIFICA_ON;
+            }
+
+            break;
+
+        case MODIFICA_ON:
+            if (!schermo_aggiornato) {
+                appoggio_t_on = tempi[indice_soglia][1];
+                visualizzaOpzioniModifica("On", "Set");
+                schermo_aggiornato = true;
+            }
+
+            lcd.home();
+            lcd.printf("%1.1f-%1.1f:  %dms", PRESS[indice_soglia], PRESS[indice_soglia+1], appoggio_t_on);
+
+            if (digitalRead(BUTTON2)) {
+                aumentaTempo(&appoggio_t_on);
+
+            } else if (digitalRead(BUTTON3)) {
+                diminuisciTempo(&appoggio_t_on);
+
+            } else if (digitalRead(BUTTON4)) {
+                while (digitalRead(BUTTON4)) lcd.clear();
+                schermo_aggiornato = false;
+                stato_attuale = CONFERMA_MODIFICA;
+            }
+
+            break;
+
+
+        case CONFERMA_MODIFICA:
+            if (!schermo_aggiornato) {
+                lcd.home();
+                lcd.printf("OFF %d", appoggio_t_off);
+                lcd.setCursor(9,0);
+                lcd.printf("ON %d ", appoggio_t_on);
+                visualizzaOpzioniMenu("Abort", "Save");
+                schermo_aggiornato = true;
+            }
+
+            if (digitalRead(BUTTON1)) {
+                while (digitalRead(BUTTON1)) lcd.clear();
+                schermo_aggiornato = false;
+                stato_attuale = HOME;
+
+            } else if (digitalRead(BUTTON4)) {
+                while (digitalRead(BUTTON4)) lcd.clear();
+                tempi[indice_soglia][1] = appoggio_t_on;
+                tempi[indice_soglia][0] = appoggio_t_off;
+                schermo_aggiornato = false;
+                stato_attuale = HOME;
+            }
+            break;
+
+        case VOCE_SALVA_TEMPI:
+            if (!schermo_aggiornato) {
+                lcd.home();
                 lcd.print("6)SALVA I TEMPI  ");
-                lcd.setCursor(0, 1);
-                lcd.write(byte(2));
-                lcd.print("Next      Save");
-                lcd.setCursor(15, 1);
-                lcd.write(byte(1));
+                visualizzaOpzioniMenu("Next", "Save");
+                schermo_aggiornato = true;
+            }
 
-                if (digitalRead(BUTTON4)) {
-                    while (digitalRead(BUTTON4)) {
-                        lcd.setCursor(0, 0);
-                        lcd.print("                ");
+            if (digitalRead(BUTTON1)) {
+                while (digitalRead(BUTTON1)) lcd.clear();
+                schermo_aggiornato = false;
+                stato_attuale = statoBT ? VOCE_SPEGNI_BLUETOOTH : VOCE_ACCENDI_BLUETOOTH;
+
+            } else if (digitalRead(BUTTON4)) {
+                while (digitalRead(BUTTON4)) lcd.clear();
+                schermo_aggiornato = false;
+                stato_attuale = CONFERMA_SALVATAGGIO;
+            }
+
+            break;
+        
+        case CONFERMA_SALVATAGGIO:
+            if (!schermo_aggiornato) {
+                lcd.home();
+                lcd.print("SALVARE?        ");
+                visualizzaOpzioniMenu("Cancel", "Save");
+                schermo_aggiornato = true;
+            }
+
+
+            // SOVRASCRIVE I DATI NELLA EEPROM
+            if (digitalRead(BUTTON4)) {
+                while (digitalRead(BUTTON4)) lcd.clear();
+
+                for (int i = 0; i < 2; i++) {
+                    for (int j = 0; j < NUM_PRESSIONI; j++) {
+                        scriviEeprom(tempi[j][i], j + (i*4));
                     }
-
-                    // CHIEDE LA CONFERMA PER SOVRASCRIVERE I DATI NELLA EEPROM
-                    while ((!digitalRead(BUTTON4)) && (!digitalRead(BUTTON1))) {
-                        lcd.setCursor(0,0);
-                        lcd.print("SALVARE?        ");
-                        lcd.setCursor(0, 1);
-                        lcd.write(byte(2));
-                        lcd.print("Cancel    Save");
-                        lcd.setCursor(15, 1);
-                        lcd.write(byte(1));
-                    }
-
-                    // SOVRASCRIVE I DATI NELLA EEPROM
-                    if (digitalRead(BUTTON4)) {
-                        while (digitalRead(BUTTON4)) {
-                            lcd.setCursor(0,0);
-                            lcd.print(" SALVATAGGIO IN ");
-                            lcd.setCursor(0,1);
-                            lcd.print("    CORSO...    ");
-                        }
-
-                        for (int i = 0; i < 2; i++) {
-                            for (int j = 0; j < 4; j++) {
-                                scriviEeprom(tempi[j][i], j + (i*4));
-                            }
-                        }
-
-                        delay(2000);
-                    }
-
-                    // ESCE DAL MENU SENZA SALVARE
-                    else if (digitalRead(BUTTON1)) {
-                        while (digitalRead(BUTTON1)) {
-                            lcd.setCursor(0,0);
-                            lcd.print("  SALVATAGGIO   ");
-                            lcd.setCursor(0,1);
-                            lcd.print("   ANNULLATO    ");
-                        }
-                        delay(2000);
-                    }
-                    funzione = 0;
                 }
-                break;
+
+                schermo_aggiornato = false;
+                stato_attuale = HOME;
+            } 
+            // ESCE DAL MENU SENZA SALVARE
+            else if (digitalRead(BUTTON1)) {
+                while (digitalRead(BUTTON1)) {
+                    lcd.home();
+                    lcd.print("  SALVATAGGIO   ");
+                    lcd.setCursor(0,1);
+                    lcd.print("   ANNULLATO    ");
+                }
+                schermo_aggiornato = false;
+                stato_attuale = HOME;
+                delay(500);
+            }
+
+            break;
+        
+        case VOCE_ACCENDI_BLUETOOTH:
+            if (!schermo_aggiornato) {
+                lcd.home();
+                lcd.print("7)ACCENDI BT    ");
+                lcd.setCursor(13,0);
+                lcd.write(byte(3));
+                visualizzaOpzioniMenu("Next", "On");
+                schermo_aggiornato = true;
+            }
+
+            if (digitalRead(BUTTON1)) {
+                while (digitalRead(BUTTON1)) lcd.clear();
+                schermo_aggiornato = false;
+                stato_attuale = VOCE_RIEPILOGO;
+
+            } else if (digitalRead(BUTTON4)) {
+                while (digitalRead(BUTTON4)) lcd.clear();
+                serialBT.begin("Centralina ESP32"); //Bluetooth device name
+                statoBT = true;
+                schermo_aggiornato = false;
+                stato_attuale = HOME;
+            }
+
+            break;
+
+        case VOCE_SPEGNI_BLUETOOTH:
+            if (!schermo_aggiornato) {
+                lcd.home();
+                lcd.print("7)SPEGNI BT     ");
+                lcd.setCursor(12,0);
+                lcd.write(byte(3));
+                visualizzaOpzioniMenu("Next", "Off");
+                schermo_aggiornato = true;
+            }
+
+            if (digitalRead(BUTTON1)) {
+                while (digitalRead(BUTTON1)) lcd.clear();
+                schermo_aggiornato = false;
+                stato_attuale = VOCE_RIEPILOGO;
+
+            } else if (digitalRead(BUTTON4)) {
+                while (digitalRead(BUTTON4)) lcd.clear();
+                serialBT.end();
+                statoBT = false;
+                schermo_aggiornato = false;
+                stato_attuale = HOME;
+            }
+            break;
+
+        case VOCE_RIEPILOGO:
+            if (!schermo_aggiornato) {
+                lcd.home();
+                lcd.print("8)RIEPILOGO      ");
+                visualizzaOpzioniMenu("Next", "Show");
+                schermo_aggiornato = true;
+            }
+
+            if (digitalRead(BUTTON1)) {
+                while (digitalRead(BUTTON1)) lcd.clear();
+                schermo_aggiornato = false;
+                stato_attuale = HOME;
+            } else if (digitalRead(BUTTON4)) {
+                while (digitalRead(BUTTON4)) lcd.clear();
+                schermo_aggiornato = false;
+                indice_soglia = 1;
+                stato_attuale = MOSTRA_RIEPILOGO;
+            }
+            break;
+        
+        case MOSTRA_RIEPILOGO:
+            if (!schermo_aggiornato) {
+                lcd.home();
+                lcd.printf("Off %d", tempi[indice_soglia-1][0]);
+                lcd.setCursor(9,0);
+                lcd.printf("On %d ", tempi[indice_soglia-1][1]);
+                visualizzaOpzioniModifica("<" + (String)PRESS[indice_soglia], "Esc");
+                schermo_aggiornato = true;
+            }
+
+
+            if (digitalRead(BUTTON2)) {
+                while (digitalRead(BUTTON2)) lcd.clear();
+                schermo_aggiornato = false;
+                indice_soglia = (indice_soglia < NUM_PRESSIONI) ? (indice_soglia + 1) : 1; 
+            } else if (digitalRead(BUTTON3)) {
+                while (digitalRead(BUTTON3)) lcd.clear();
+                schermo_aggiornato = false;
+                indice_soglia = (indice_soglia > 1) ? (indice_soglia - 1) : NUM_PRESSIONI; 
+            } else if (digitalRead(BUTTON4)) {
+                while (digitalRead(BUTTON4)) lcd.clear();
+                schermo_aggiornato = false;
+                stato_attuale = HOME;
+            }
+            break;
+    }
+
+    if (pressione < PRESS[0]) {
+
+        if (serialBT.available()){
+            char incomingChar = serialBT.read();
+            if (incomingChar != '\n') {
+                messaggioBT += String(incomingChar);
+            } else {
+                messaggioBT = "";
+            } 
         }
 
-        delay(50); // Abbassa il refresh rate dello schermo
-    }
+        if (messaggioBT == "tempi") {
 
-    pressione = leggiSensorePressione();
+            String risposta;
+            StaticJsonDocument<256> doc;
 
-    // AZIONA IL RELE SOLO SE CI SI TROVA NELLA HOME
-    if (funzione == 0) {
-        // AZIONA IL RELE IN BASE ALLA PRESSIONE
-        if (pressione <= PRESS[0]) {
-            tempo_partenza = millis();
-            iniezione = false;
-            digitalWrite(RELE, LOW);
-        } else if (pressione < PRESS[1]) {
-            iniezione = true;
-            attivaIniezione(tempi[0][0], tempi[0][1], 1);
-        } else if (pressione < PRESS[2]) {
-            iniezione = true;
-            attivaIniezione(tempi[1][0], tempi[1][1], 2);
-        } else if (pressione < PRESS[3]) {
-            iniezione = true;
-            attivaIniezione(tempi[2][0], tempi[2][1], 3);
-        } else {
-            iniezione = true;
-            attivaIniezione(tempi[3][0], tempi[3][1], 4);
-        }   
+            JsonArray t[NUM_PRESSIONI];
+
+            for (int i = 0; i < NUM_PRESSIONI; i++) {
+                t[i] = doc.createNestedArray("t" + (String)i);
+                t[i].add(tempi[i][0]);
+                t[i].add(tempi[i][1]);
+            }
+
+            serializeJson(doc, risposta);
+            risposta += "\n";
+
+            #ifdef DEBUG
+            Serial.println(messaggioBT);
+            Serial.println(risposta);
+            #endif 
+
+            serialBT.print(risposta);
+            messaggioBT = "";
+
+        } else if (messaggioBT.charAt(0) == '{' && messaggioBT.charAt(messaggioBT.length() - 1) == '}') {
+
+            #ifdef DEBUG
+            Serial.println(messaggioBT);
+            #endif 
+
+            StaticJsonDocument<256> doc;
+            DeserializationError error = deserializeJson(doc, messaggioBT);
+
+            if (error) {
+                #ifdef DEBUG
+                Serial.print("deserializeJson() failed: ");
+                Serial.println(error.c_str());
+                #endif
+            } else {
+
+                for (int i = 0; i < NUM_PRESSIONI; i++) {
+                    for (int j = 0; j < 2; j++) {
+                        tempi[i][j] = (doc["t"+(String)i][j] >= 25) ?  doc["t"+(String)i][j] : 25;
+                    }
+                }
+            }
+
+            messaggioBT = "";
+        }
     }
 }
 
 
-// VISUALIZZA LA PRESSIONE NELLA PAGINA INIZIALE
+// Legge la pressione dal sensore
+void leggiSensorePressione() {
+    pressione = (float) ( ((double)analogRead(PRESSURE_SENSOR)) * 0.0013745704467353952) - 0.79579037800687285223;
+
+    if (pressione > pressione_max) {
+        pressione_max = pressione;
+    }
+
+}
+
+
+// Visualizza la pressione nella pagina iniziale
 void visualizzaPressione() {
-    lcd.setCursor(0,0);
-    lcd.print("PRESS:       bar");
-    lcd.setCursor(8,0);
-    lcd.print(pressione);
+    lcd.home();
+    lcd.printf("Pressione: %1.2f ", pressione);
     lcd.setCursor(0,1);
-    lcd.print("PRESS MAX: ");
-    lcd.setCursor(15,1);
-    lcd.print("b");
-    lcd.setCursor(11,1);
-    lcd.print(pressione_max);
+    lcd.printf("Press Max: %1.2f ", pressione_max);
 }
 
 
-// VISUALIZZA LA PRESSIONE DURANTE L'INIEZIONE
-void visualizzaPressioneIniezione() {
-    if (prima_iniezione) {
-        lcd.clear();
-        lcd.setCursor(0,0);
-        lcd.print("PRESS:       bar");
-        lcd.setCursor(0,1);
-        lcd.print("Iniezione attiva");
-        prima_iniezione = false;
-    }
-    lcd.setCursor(8,0);
-    lcd.print(pressione);
-}
-
-
-// VISUALIZZA LE PAGINE DEL MENU
-void visualizzaPaginaMenu(float press_iniz, float press_fin) {
-    lcd.setCursor(0,0);
-    lcd.print(" )DA     A    ba");
-    lcd.setCursor(0,0);
-    lcd.print(funzione);
-    lcd.setCursor(5,0);
-    lcd.print(press_iniz, 1);
-    lcd.setCursor(11,0);
-    lcd.print(press_fin, 1);
-
+// Visualizza le opzioni disponibili per i pulsanti esterni
+void visualizzaOpzioniMenu(String sx, String dx) {
+    lcd.setCursor(0, 1);
+    lcd.print("                ");
     lcd.setCursor(0, 1);
     lcd.write(byte(2));
-    lcd.print("Next       Set");
     lcd.setCursor(15, 1);
     lcd.write(byte(1));
-
-    delay(50);
+    lcd.setCursor(1,1);
+    lcd.print(sx);
+    lcd.setCursor(15 - dx.length(), 1);
+    lcd.print(dx);
 }
 
 
-// DURANTE LA MODIFICA, VISUALIZZA LE PRESSIONI "SOGLIA" E I RELATIVI TEMPI
-void visualizzaModifiche(uint32_t tempo, float press_min, float press_max) {
-    lcd.setCursor(0, 0);
-    lcd.print(press_min, 1);  
-    lcd.setCursor(3, 0);
-    lcd.print("-");
-    lcd.setCursor(4, 0);
-    lcd.print(press_max, 1);
-    lcd.setCursor(7, 0);
-    lcd.print(":");
-    lcd.setCursor(12, 0);
-    lcd.print("  ms");
-    lcd.setCursor(10, 0);
-    lcd.print(tempo);
-
-    delay(50);
-}
-
-
-// LEGGE LA PRESSIONE DAL SENSORE
-float leggiSensorePressione() {
-    float lettura;
-    lettura = (float) (analogRead(PRESSURE_SENSOR) - 338) / 292;
-
-    if (lettura > pressione_max) {
-        pressione_max = lettura;
-    }
-    
-    return lettura;
-}
-
-
-// CONTROLLA SE IL PRIMO PULSANTE VIENE PREMUTO
-void controlloPulsante() {
-    if (digitalRead(BUTTON1)) {
-        while (digitalRead(BUTTON1)) {
-            lcd.setCursor(0,0);
-            lcd.print("                ");
-        }
-
-        // Alla pressione, aumenta la funzione, se si è alla 5 ritorna alla pagina iniziale
-        if (funzione >= 6) {
-            funzione = 0;
-        } else {
-            funzione++;
-        }
-    }
-}
-
-
-// ACCENDE E SPEGNE IL RELE
-void attivaIniezione(uint32_t t_off, uint32_t t_on, uint8_t numero) {
-
-    // Calcola il ritardo causato dall'esecuzione del resto del codice
-    ritardo = millis() - tempo_partenza;
-
-    if (ritardo <= t_off) {
-        t_off -= ritardo;
-    } else {
-        t_off = 0;
-    }
-
-    #ifdef DEBUG
-    print64(&Serial, ritardo);
-    Serial.print(" ");
-    #endif
-
-    // IN CASO DI ERRORI IMPOSTA t_off = 1
-    if (t_off < 0) {
-        tempo_partenza = millis();
-        t_off = 1;
-    }
-
-    inizio_iniezione = millis();
-
-    digitalWrite(RELE, HIGH);
-
-    // Mentre aspetta il tempo on, controlla se la pressione letta cambia il range
-    while (millis() - inizio_iniezione <= t_on) {
-        pressione = leggiSensorePressione();
-        visualizzaPressioneIniezione();
-        
-        // ESCE SE IL RANGE DELLA PRESSIONE È CAMBIATO DI ALMENO 0,03bar
-        if ((pressione > (PRESS[numero] + 0.05)) || (pressione < (PRESS[numero-1] - 0.05))) {
-            return;
-        }
-    }
-
-    #ifdef DEBUG
-    print64(&Serial, (millis() - inizio_iniezione));
-    Serial.print(" ");
-    #endif
-
-    inizio_iniezione = millis();
-
-    digitalWrite(RELE, LOW);
-
-    // Mentre aspetta il tempo off, controlla se la pressione letta cambia il range    
-    while (millis() - inizio_iniezione <= t_off) {
-        pressione = leggiSensorePressione();
-        visualizzaPressioneIniezione();
-        // ESCE SE IL RANGE DELLA PRESSIONE è CAMBIATO
-        if ((pressione > PRESS[numero]) || (pressione < PRESS[numero-1])) {
-            return;
-        }
-    }
-
-    #ifdef DEBUG
-    println64(&Serial, (millis() - inizio_iniezione));
-    #endif
-
-    tempo_partenza = millis();
-}
-
-
-// MODIFICA I TEMPI DI INIEZIONE
-void modificaTempi(float press_min, float press_max, uint32_t *t_off, uint32_t *t_on) {
-    lcd.setCursor(0, 1);
-    lcd.print("ON    +  -  Set");
+// Visualizza le opzioni disponibili per gli ultimi 3 pulsanti
+void visualizzaOpzioniModifica(String sx, String dx) {
+    lcd.setCursor(0,1);
+    lcd.print(sx);
+    lcd.setCursor(4,1);
+    lcd.print("  +  -     ");
+    lcd.setCursor(15 - dx.length(), 1);
+    lcd.print(dx);
     lcd.setCursor(5, 1);
     lcd.write(byte(0));
     lcd.setCursor(10, 1);
     lcd.write(byte(0));
     lcd.setCursor(15, 1);
     lcd.write(byte(1));
-
-    // MODIFICA IL TEMPO DI INIEZIONE APERTO
-    while (!digitalRead(BUTTON4)) {
-
-        // AUMENTA IL TEMPO
-        if (digitalRead(BUTTON2)) {
-            aumentaTempi(press_min, press_max, t_on);
-        }
-
-        // DIMINUISCE IL TEMPO
-        else if (digitalRead(BUTTON3)) {
-            diminuisciTempi(press_min, press_max, t_on, 0);
-        }
-
-        visualizzaModifiche(*t_on, press_min, press_max);
-    }
-
-    while(digitalRead(BUTTON4)) {
-        lcd.setCursor(0, 1);
-        lcd.print("OFF");
-        visualizzaModifiche(*t_off, press_min, press_max);
-    }
-
-    // MODIFICA IL TEMPO DI INIEZIONE "CHIUSO"
-    while (!digitalRead(BUTTON4)) {
-
-        // AUMENTA IL TEMPO
-        if (digitalRead(BUTTON2)) {
-            aumentaTempi(press_min, press_max, t_off);
-        }
-
-        // DIMINUISCE IL TEMPO
-        else if (digitalRead(BUTTON3)) {
-            diminuisciTempi(press_min, press_max, t_off, T_OFF_MIN);
-        }
-
-        visualizzaModifiche(*t_off, press_min, press_max);
-    }
-
-    while (digitalRead(BUTTON4)) {
-        lcd.setCursor(0, 0);
-        lcd.print("  SALVATAGGIO   ");
-    }
-    funzione = 0;
 }
 
 
-// AUMENTA I TEMPI DI INIEZIONE
-void aumentaTempi(float press_min, float press_max, uint32_t *t) { 
-    *t += OFFSET;
+// Aumenta il tempo di iniezione
+void aumentaTempo(uint32_t *tempo) {
+    *tempo += OFFSET;
+    lcd.setCursor(10,0);
+    lcd.printf("%dms", *tempo);
     delay(400);
+
     while (digitalRead(BUTTON2)) {
-        *t += OFFSET;
-        visualizzaModifiche(*t, press_min, press_max);
+        *tempo += OFFSET;
+        lcd.setCursor(10,0);
+        lcd.printf("%dms", *tempo);
         delay(200);
     }
 }
 
 
-// DIMINUISCE I TEMPI DI INIEZIONE
-void diminuisciTempi(float press_min, float press_max, uint32_t *t, uint32_t t_min) {
-    // t_min: Tempo minimo di iniezione
-    if (*t > t_min) {
-        *t -= OFFSET;
-    }
+// Diminuisce il tempo di iniezione
+void diminuisciTempo(uint32_t *tempo) {
+    if ((*tempo - OFFSET) >= T_MIN) *tempo -= OFFSET;
+    lcd.setCursor(10,0);
+    lcd.printf("%dms  ", *tempo);
     delay(400);
+
     while (digitalRead(BUTTON3)) {
-        if (*t > t_min) {
-            *t -= OFFSET;
-        }
-        visualizzaModifiche(*t, press_min, press_max);
+        if ((*tempo - OFFSET) >= T_MIN) *tempo -= OFFSET;
+        lcd.setCursor(10,0);
+        lcd.printf("%dms  ", *tempo);
         delay(200);
     }
 }
 
 
-// LEGGE LA EEPROM
+// Legge la EEPROM
 uint32_t leggiEeprom(uint8_t i) {
     uint32_t lettura = EEPROM.read(i*2) * 256 + EEPROM.read(i*2+1);
     return lettura;
 }
 
 
-// SOVRASCRIVE LA EEPROM
+// Sovrascrive la EEPROM
 void scriviEeprom(uint32_t valore, uint8_t i) {
     for (int j = 0; j < 2; j++) {
         EEPROM.put(i*2, highByte(valore));
         EEPROM.put(i*2+1, lowByte(valore));
     }  
     EEPROM.commit();
-}
-
-
-// STAMPA DI INTERI A 64bit
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wreturn-type" //Ignora il fatto che la funziona non ritorna nulla
-size_t print64(Print* pr, uint64_t n) {
-    char buf[21];
-    char *str = &buf[sizeof(buf) - 1];
-    *str = '\0';
-    do {
-        uint64_t m = n;
-        n /= 10;
-        *--str = m - 10*n + '0';
-    } while (n);
-    pr->print(str);
-}
-#pragma GCC diagnostic pop
-
-size_t print64(Print* pr, int64_t n) {
-    size_t s = 0;
-    if (n < 0) {
-        n = -n;
-        s = pr->print('-');
-    }  return s + print64(pr, (uint64_t)n);
-}
-
-size_t println64(Print* pr, int64_t n) {
-    return print64(pr, n) + pr->println();
-}
-
-size_t println64(Print* pr, uint64_t n) {
-    return print64(pr, n) + pr->println();
 }
